@@ -1,0 +1,55 @@
+name: Build and merge pull requests
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, reopened, synchronize, ready_for_review]
+
+permissions: {}
+
+concurrency:
+  group: auto-merge-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the proposed merge with main
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '8.0.x'
+      - name: Restore dependencies
+        run: dotnet restore Yadeh.sln
+      - name: Build Release
+        run: dotnet build Yadeh.sln --configuration Release --no-restore
+
+  auto-merge:
+    needs: build
+    if: >-
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.user.login == github.repository_owner &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      # Keep the write token isolated from the job that builds PR code.
+      - name: Merge the revision that passed the build
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        # Do not queue auto-merge: a later revision must pass its own build.
+        run: gh pr merge "$PR_NUMBER" --merge --match-head-commit "$HEAD_SHA"
