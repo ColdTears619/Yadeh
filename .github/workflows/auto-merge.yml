@@ -107,12 +107,26 @@ jobs:
         uses: actions/checkout@v6
         with:
           ref: ${{ needs.prepare.outputs.merge_sha }}
+          # Parent verification needs the merge commit and both parents.
+          fetch-depth: 2
           persist-credentials: false
       - name: Verify the proposed merge revision
         env:
           HEAD_SHA: ${{ github.sha }}
           BASE_SHA: ${{ needs.prepare.outputs.base_sha }}
-        run: test "$(git show -s --format=%P HEAD)" = "$BASE_SHA $HEAD_SHA"
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual_parents=$(git show -s --format=%P HEAD)
+          expected_parents="$BASE_SHA $HEAD_SHA"
+          if [[ "$actual_parents" != "$expected_parents" ]]; then
+            echo '::error::The checked-out merge does not have the expected main and branch parents.'
+            echo "Expected parents: $expected_parents"
+            echo "Actual parents: $actual_parents"
+            echo "Shallow checkout: $(git rev-parse --is-shallow-repository)"
+            exit 1
+          fi
+          echo 'Verified the proposed merge contains the expected main and branch revisions.'
       - name: Set up .NET 8
         uses: actions/setup-dotnet@v5
         with:
