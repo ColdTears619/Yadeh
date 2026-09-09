@@ -1,28 +1,118 @@
-name: Build and merge pull requests
+name: Create, build, and merge pull requests
 
 on:
-  pull_request:
-    branches: [main]
-    types: [opened, reopened, synchronize, ready_for_review]
+  push:
+    branches-ignore: [main]
+  workflow_dispatch:
 
 permissions: {}
 
 concurrency:
-  group: auto-merge-${{ github.event.pull_request.number }}
-  cancel-in-progress: false
+  group: push-to-main-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
+  prepare:
+    name: Prepare pull request
+    if: >-
+      github.ref_type == 'branch' &&
+      github.ref_name != 'main' &&
+      github.event.deleted != true &&
+      github.actor == github.repository_owner
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: write
+    outputs:
+      number: ${{ steps.pr.outputs.number }}
+      merge_sha: ${{ steps.pr.outputs.merge_sha }}
+      base_sha: ${{ steps.pr.outputs.base_sha }}
+      ready: ${{ steps.pr.outputs.ready }}
+    steps:
+      # This job uses repository metadata only; it never runs branch code.
+      - name: Create or reuse a PR and check for conflicts
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          BRANCH: ${{ github.ref_name }}
+          HEAD_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'ready=false' >> "$GITHUB_OUTPUT"
+
+          ahead=$(gh api "repos/$GH_REPO/compare/main...$HEAD_SHA" --jq '.ahead_by')
+          if [[ "$ahead" == 0 ]]; then
+            echo 'No new commits to merge into main.'
+            exit 0
+          fi
+
+          number=$(gh pr list --base main --head "$BRANCH" --state open \
+            --json number --jq '.[0].number // empty')
+          if [[ -z "$number" ]]; then
+            number=$(gh api --method POST "repos/$GH_REPO/pulls" \
+              -f "title=Merge $BRANCH into main" \
+              -f "head=$BRANCH" -f base=main \
+              -f 'body=Created automatically after a branch push. The proposed merge must build successfully before it is merged.' \
+              --jq '.number')
+          fi
+          echo "number=$number" >> "$GITHUB_OUTPUT"
+
+          # GitHub calculates mergeability asynchronously after PR updates.
+          for attempt in {1..12}; do
+            pr=$(gh api "repos/$GH_REPO/pulls/$number")
+            if ! jq -e --arg sha "$HEAD_SHA" --arg repo "$GH_REPO" \
+              '.state == "open" and .base.ref == "main" and
+               .head.sha == $sha and .head.repo.full_name == $repo' \
+              <<< "$pr" > /dev/null; then
+              echo '::error::The PR changed or closed. Use the workflow for the latest push.'
+              exit 1
+            fi
+            if [[ $(jq -r '.draft' <<< "$pr") == true ]]; then
+              echo 'Draft PR left open. Push again or run this workflow after marking it ready.'
+              exit 0
+            fi
+            mergeable=$(jq -r '.mergeable | tostring' <<< "$pr")
+            if [[ "$mergeable" == false ]]; then
+              echo '::error::The PR conflicts with main. Resolve the conflicts and push again.'
+              exit 1
+            fi
+            if [[ "$mergeable" == true ]]; then
+              merge_sha=$(jq -r '.merge_commit_sha // empty' <<< "$pr")
+              base_sha=$(jq -r '.base.sha' <<< "$pr")
+              if [[ -n "$merge_sha" ]]; then
+                echo "merge_sha=$merge_sha" >> "$GITHUB_OUTPUT"
+                echo "base_sha=$base_sha" >> "$GITHUB_OUTPUT"
+                echo 'ready=true' >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+            fi
+            sleep 2
+          done
+          echo '::error::GitHub could not determine mergeability in time. Re-run the workflow.'
+          exit 1
+
   build:
     name: Build
+    needs: prepare
+    if: needs.prepare.outputs.ready == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: read
     steps:
-      - name: Check out the proposed merge with main
+      - name: Check out the exact proposed merge with main
         uses: actions/checkout@v6
         with:
+          ref: ${{ needs.prepare.outputs.merge_sha }}
           persist-credentials: false
+      - name: Verify the proposed merge revision
+        env:
+          HEAD_SHA: ${{ github.sha }}
+          BASE_SHA: ${{ needs.prepare.outputs.base_sha }}
+        run: test "$(git show -s --format=%P HEAD)" = "$BASE_SHA $HEAD_SHA"
       - name: Set up .NET 8
         uses: actions/setup-dotnet@v5
         with:
@@ -33,23 +123,43 @@ jobs:
         run: dotnet build Yadeh.sln --configuration Release --no-restore
 
   auto-merge:
-    needs: build
-    if: >-
-      github.event.pull_request.draft == false &&
-      github.event.pull_request.user.login == github.repository_owner &&
-      github.event.pull_request.head.repo.full_name == github.repository
+    name: Merge pull request
+    needs: [prepare, build]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
       contents: write
       pull-requests: write
     steps:
-      # Keep the write token isolated from the job that builds PR code.
-      - name: Merge the revision that passed the build
+      # Keep the write token isolated from the job that builds branch code.
+      - name: Merge only if the tested head and base are still current
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        # Do not queue auto-merge: a later revision must pass its own build.
-        run: gh pr merge "$PR_NUMBER" --merge --match-head-commit "$HEAD_SHA"
+          PR_NUMBER: ${{ needs.prepare.outputs.number }}
+          HEAD_SHA: ${{ github.sha }}
+          BASE_SHA: ${{ needs.prepare.outputs.base_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          pr=$(gh api "repos/$GH_REPO/pulls/$PR_NUMBER")
+          current_base=$(gh api "repos/$GH_REPO/commits/main" --jq '.sha')
+          if [[ "$current_base" != "$BASE_SHA" ]]; then
+            echo '::error::main changed during the build. Re-run the workflow to build against the new main.'
+            exit 1
+          fi
+          if ! jq -e --arg sha "$HEAD_SHA" --arg repo "$GH_REPO" \
+            '.state == "open" and .draft == false and .base.ref == "main" and
+             .head.sha == $sha and .head.repo.full_name == $repo' \
+            <<< "$pr" > /dev/null; then
+            echo '::error::The PR changed or closed after the build. Merge cancelled.'
+            exit 1
+          fi
+          # The API enforces repository rules and atomically checks the head SHA.
+          result=$(gh api --method PUT "repos/$GH_REPO/pulls/$PR_NUMBER/merge" \
+            -f "sha=$HEAD_SHA" -f merge_method=merge)
+          if ! jq -e '.merged == true' <<< "$result" > /dev/null; then
+            echo '::error::GitHub did not merge the PR. Check its merge requirements.'
+            jq -r '.message' <<< "$result"
+            exit 1
+          fi
