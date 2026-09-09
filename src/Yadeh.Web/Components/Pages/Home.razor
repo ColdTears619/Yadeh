@@ -1,7 +1,60 @@
 ﻿@page "/"
+@using System.ComponentModel.DataAnnotations
 
-<PageTitle>Home</PageTitle>
+<PageTitle>Yadeh</PageTitle>
 
-<h1>Hello, world!</h1>
+<main>
+    <h1>Yadeh</h1>
+    <p>Paste a shared ChatGPT conversation link.</p>
 
-Welcome to your new app.
+    <EditForm Model="_form" OnValidSubmit="ValidateLink" FormName="share-link">
+        <DataAnnotationsValidator />
+
+        <label for="shareUrl">Shared conversation link</label>
+
+        <InputText id="shareUrl" class="form-control" type="url" placeholder="https://chatgpt.com/share/..."
+                   @bind-Value="_form.Url" />
+
+        <ValidationMessage For="@(() => _form.Url)" />
+
+        <button type="submit">Check link</button>
+    </EditForm>
+
+    @if (_message is not null)
+    {
+        <p>@_message</p>
+    }
+</main>
+
+@code {
+    private readonly ImportForm _form = new();
+    private string? _message;
+
+    private void ValidateLink()
+    {
+        if (!Uri.TryCreate(_form.Url, UriKind.Absolute, out var uri))
+        {
+            _message = "The link format is invalid.";
+            return;
+        }
+
+        var isChatGptHost = uri.Host.Equals(
+            "chatgpt.com",
+            StringComparison.OrdinalIgnoreCase);
+
+        var isSharedConversation = uri.AbsolutePath.StartsWith(
+            "/share/",
+            StringComparison.OrdinalIgnoreCase);
+
+        _message = isChatGptHost && isSharedConversation
+            ? "The link is valid and ready to import."
+            : "Enter a link that starts with https://chatgpt.com/share/.";
+    }
+
+    private sealed class ImportForm
+    {
+        [Required(ErrorMessage = "Enter a shared conversation link.")]
+        [Url(ErrorMessage = "Enter a valid URL.")]
+        public string Url { get; set; } = string.Empty;
+    }
+}
