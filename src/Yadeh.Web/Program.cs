@@ -3,11 +3,16 @@ using Yadeh.Infrastructure;
 
 var builder = WebApplication.CreateBuilder(args);
 
+var connectionString =
+    builder.Configuration.GetConnectionString("YadehDatabase")
+    ?? throw new InvalidOperationException(
+        "The Yadeh database connection string is not configured.");
+
 // Add services to the container.
 builder.Services.AddRazorComponents()
     .AddInteractiveServerComponents();
 
-builder.Services.AddInfrastructure();
+builder.Services.AddInfrastructure(connectionString);
 
 var app = builder.Build();
 
