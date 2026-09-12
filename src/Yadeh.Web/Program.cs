@@ -1,10 +1,13 @@
 using Yadeh.Web.Components;
+using Yadeh.Infrastructure;
 
 var builder = WebApplication.CreateBuilder(args);
 
 // Add services to the container.
 builder.Services.AddRazorComponents()
     .AddInteractiveServerComponents();
+
+builder.Services.AddInfrastructure();
 
 var app = builder.Build();
 

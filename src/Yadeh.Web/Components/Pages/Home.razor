@@ -1,5 +1,10 @@
 ﻿@page "/"
+@implements IDisposable
 @using System.ComponentModel.DataAnnotations
+@using Yadeh.Application.SharedChats.Contracts
+@using Yadeh.Application.SharedChats.Models
+@using Yadeh.Domain.SharedChats
+@inject IChatGptSharedChatProbeClient ProbeClient
 
 <PageTitle>Yadeh</PageTitle>
 
@@ -7,7 +12,7 @@
     <h1>Yadeh</h1>
     <p>Paste a shared ChatGPT conversation link.</p>
 
-    <EditForm Model="_form" OnValidSubmit="ValidateLink" FormName="share-link">
+    <EditForm Model="_form" OnValidSubmit="ProbeAsync" FormName="share-link">
         <DataAnnotationsValidator />
 
         <label for="shareUrl">Shared conversation link</label>
@@ -17,38 +22,88 @@
 
         <ValidationMessage For="@(() => _form.Url)" />
 
-        <button type="submit">Check link</button>
+        <button type="submit" disabled="@_isLoading">
+            @(_isLoading ? "Checking..." : "Check link")
+        </button>
     </EditForm>
 
-    @if (_message is not null)
+    @if (_validationError is not null)
     {
-        <p>@_message</p>
+        <p role="alert">@_validationError</p>
+    }
+
+    @if (_result is { IsSuccess: false })
+    {
+        <p role="alert">@_result.Error</p>
+    }
+
+    @if (_result?.Snapshot is { } snapshot)
+    {
+        <section>
+            <h2>@(snapshot.Title ?? "Untitled conversation")</h2>
+
+            <p>
+                @snapshot.Messages.Count messages ·
+                @_result.DownloadedContentLength characters downloaded
+            </p>
+
+            @foreach (var message in snapshot.Messages)
+            {
+                <article @key="message.Sequence">
+                    <h3>@message.Role</h3>
+                    <pre>@message.Content</pre>
+                </article>
+            }
+        </section>
     }
 </main>
 
 @code {
     private readonly ImportForm _form = new();
-    private string? _message;
+    private readonly CancellationTokenSource _disposeTokenSource = new();
 
-    private void ValidateLink()
+    private SharedChatProbeResult? _result;
+    private string? _validationError;
+    private bool _isLoading;
+
+    private async Task ProbeAsync()
     {
-        if (!Uri.TryCreate(_form.Url, UriKind.Absolute, out var uri))
+        _result = null;
+        _validationError = null;
+
+        if (!ChatGptSharedChatLink.TryCreate(
+                _form.Url,
+                out var link))
         {
-            _message = "The link format is invalid.";
+            _validationError =
+                "Enter a valid https://chatgpt.com/share/... link.";
+
             return;
         }
 
-        var isChatGptHost = uri.Host.Equals(
-            "chatgpt.com",
-            StringComparison.OrdinalIgnoreCase);
+        _isLoading = true;
 
-        var isSharedConversation = uri.AbsolutePath.StartsWith(
-            "/share/",
-            StringComparison.OrdinalIgnoreCase);
+        try
+        {
+            _result = await ProbeClient.ProbeAsync(
+                link,
+                _disposeTokenSource.Token);
+        }
+        catch (OperationCanceledException)
+            when (_disposeTokenSource.IsCancellationRequested)
+        {
+            // The component was disposed while the request was running.
+        }
+        finally
+        {
+            _isLoading = false;
+        }
+    }
 
-        _message = isChatGptHost && isSharedConversation
-            ? "The link is valid and ready to import."
-            : "Enter a link that starts with https://chatgpt.com/share/.";
+    public void Dispose()
+    {
+        _disposeTokenSource.Cancel();
+        _disposeTokenSource.Dispose();
     }
 
     private sealed class ImportForm
