@@ -1,6 +1,7 @@
 using System.Net.Http.Headers;
 using Microsoft.Extensions.DependencyInjection;
 using Yadeh.Application.SharedChats.Contracts;
+using Yadeh.Infrastructure.Persistence;
 using Yadeh.Infrastructure.SharedChats;
 using Yadeh.Infrastructure.SharedChats.Parsing;
 
@@ -9,9 +10,13 @@ namespace Yadeh.Infrastructure;
 public static class DependencyInjection
 {
     public static IServiceCollection AddInfrastructure(
-        this IServiceCollection services)
+        this IServiceCollection services,
+        string connectionString)
     {
         ArgumentNullException.ThrowIfNull(services);
+        ArgumentException.ThrowIfNullOrWhiteSpace(connectionString);
+
+        services.AddPersistence(connectionString);
 
         services.AddSingleton<ReactRouterStreamDecoder>();
 
