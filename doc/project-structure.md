@@ -1,93 +1,181 @@
 # Project Structure
 
-Yadeh currently consists of a single ASP.NET Core web project using Blazor
-Interactive Server. Application code lives in `src/Yadeh.Web`.
+Yadeh is a .NET 8 solution organized into Domain, Application, Infrastructure,
+and Web layers. Tests are separated by the layer they exercise.
 
 ## Directory Layout
 
 ```text
 Yadeh/
-├── README.md
-├── LICENSE
-├── Yadeh.sln
-├── global.json
+├── .config/
+│   └── dotnet-tools.json
 ├── doc/
 │   ├── README.md
 │   └── project-structure.md
-└── src/
-    └── Yadeh.Web/
-        ├── Yadeh.Web.csproj
-        ├── Program.cs
-        ├── appsettings.json
-        ├── appsettings.Development.json
-        ├── Properties/
-        │   └── launchSettings.json
-        ├── Components/
-        │   ├── App.razor
-        │   ├── Routes.razor
-        │   ├── _Imports.razor
-        │   ├── Layout/
-        │   │   ├── MainLayout.razor
-        │   │   └── MainLayout.razor.css
-        │   └── Pages/
-        │       ├── Home.razor
-        │       └── Error.razor
-        └── wwwroot/
-            └── app.css
+├── src/
+│   ├── Yadeh.Domain/
+│   │   ├── Conversations/
+│   │   │   ├── Enums/
+│   │   │   ├── Conversation.cs
+│   │   │   ├── ConversationMessage.cs
+│   │   │   └── ConversationSnapshot.cs
+│   │   └── SharedChats/
+│   │       └── ChatGptSharedChatLink.cs
+│   ├── Yadeh.Application/
+│   │   ├── Common/Contracts/
+│   │   ├── Conversations/Contracts/
+│   │   └── SharedChats/
+│   │       ├── Contracts/
+│   │       ├── Enums/
+│   │       └── Models/
+│   ├── Yadeh.Infrastructure/
+│   │   ├── Persistence/
+│   │   │   ├── Configurations/
+│   │   │   ├── Migrations/
+│   │   │   ├── Repositories/
+│   │   │   ├── YadehDbContext.cs
+│   │   │   └── YadehUnitOfWork.cs
+│   │   └── SharedChats/
+│   │       ├── Parsing/
+│   │       └── ChatGptSharedChatProbeClient.cs
+│   └── Yadeh.Web/
+│       ├── Components/
+│       │   ├── Layout/
+│       │   └── Pages/
+│       ├── wwwroot/
+│       ├── Program.cs
+│       └── appsettings.json
+└── tests/
+    ├── Yadeh.Domain.Tests/
+    └── Yadeh.Infrastructure.Tests/
 ```
 
-The tree focuses on application code and documentation. Generated `bin/` and
-`obj/` directories are omitted.
+Generated `bin/` and `obj/` directories and individual source files that do not
+affect the architectural overview are omitted.
 
-## Entry Points and Rendering
+## Dependency Direction
 
-| File | Responsibility |
-| --- | --- |
-| `Yadeh.sln` | Groups the projects built as part of the solution. |
-| `global.json` | Selects an installed .NET 8 SDK, allowing newer .NET 8 feature bands. |
-| `src/Yadeh.Web/Yadeh.Web.csproj` | Defines the web project, targets `net8.0`, and enables nullable reference types and implicit imports. |
-| `src/Yadeh.Web/Program.cs` | Registers Razor components and Interactive Server support, configures middleware, and maps the root component. |
-| `src/Yadeh.Web/Components/App.razor` | Defines the HTML document, loads styles and the Blazor script, and applies Interactive Server rendering to the routes and document head. |
-| `src/Yadeh.Web/Components/Routes.razor` | Resolves page routes, applies the default layout, and manages focus after navigation. |
-| `src/Yadeh.Web/Components/_Imports.razor` | Shares Razor imports across components. |
+| Project | References | Responsibility |
+| --- | --- | --- |
+| `Yadeh.Domain` | None | Business entities, value objects, invariants, and conversation versioning. |
+| `Yadeh.Application` | Domain | Use-case models and contracts for persistence and external sources. |
+| `Yadeh.Infrastructure` | Application, Domain | HTTP integrations, parsing, EF Core, SQLite, repositories, and migrations. |
+| `Yadeh.Web` | Application, Infrastructure | Blazor UI, configuration, middleware, and dependency composition. |
 
-Interactive Server handles component events on the server through a connection
-with the browser. The application must remain running for interactive features
+The Domain project has no dependency on EF Core, ASP.NET Core, or provider APIs.
+Application code depends on abstractions while Infrastructure supplies their
+implementations.
+
+## Conversation Model
+
+`Conversation` is the aggregate root. It has an editable title and owns one or
+more `ConversationSnapshot` entities. Each snapshot records:
+
+- the original title reported by the source;
+- the source share URL;
+- the UTC import time;
+- an ordered collection of `ConversationMessage` entities.
+
+A share URL is intentionally not unique. Importing an updated link can add a new
+snapshot to an existing conversation, while the user may also choose to create a
+separate conversation from the same link. Message sequence is unique within each
+snapshot.
+
+## Shared Chat Retrieval
+
+The current ChatGPT integration has three responsibilities:
+
+1. `ChatGptSharedChatLink` validates ChatGPT share URLs.
+2. `ChatGptSharedChatProbeClient` downloads the public page with size and timeout
+   limits.
+3. `ChatGptSharedChatPageParser` decodes the page and returns the provider-neutral
+   `SharedChatSnapshot` application model.
+
+The next import step adds `ISharedChatSourceAdapter`. A ChatGPT adapter will
+translate a general source URL into the existing ChatGPT client contract. A small
+Resolver will locate the adapter whose `CanHandle` method accepts the URL. Once an
+adapter returns `SharedChatSnapshot`, preview, merge selection, and persistence
+follow one shared application workflow.
+
+## Persistence
+
+`YadehDbContext` maps the aggregate to three SQLite tables:
+
+```text
+Conversations
+    └── ConversationSnapshots
+            └── ConversationMessages
+```
+
+Entity configurations live in separate files under
+`Persistence/Configurations`. Both relationships use cascade deletion. The
+database also enforces non-negative message sequence values and a unique
+`ConversationSnapshotId` plus `Sequence` index.
+
+`IConversationRepository` provides aggregate retrieval and mutation operations.
+`IUnitOfWork` defines the save boundary, and `YadehUnitOfWork` delegates it to EF
+Core's `SaveChangesAsync`.
+
+The initial migration lives in `Persistence/Migrations`. The repository-local
+`dotnet-ef` version is recorded in `.config/dotnet-tools.json`.
+
+## Web Entry Point and Rendering
+
+`src/Yadeh.Web/Program.cs` reads the `YadehDatabase` connection string, registers
+Infrastructure services, configures middleware, and maps Razor components with
+Interactive Server rendering.
+
+`Components/Pages/Home.razor` currently accepts a ChatGPT share link, validates
+it, downloads it, and displays the parsed title and messages. It does not yet
+persist that preview. The upcoming conversation import application service will
+replace the page's direct dependency on the ChatGPT probe contract.
+
+Interactive Server handles component events on the server through a live browser
+connection. The application process must remain running for interactive features
 to work.
-
-## Pages, Layout, and Styles
-
-- `Components/Pages/` contains routable Razor components. `Home.razor` serves `/`;
-  `Error.razor` provides the error page.
-- `Components/Layout/MainLayout.razor` wraps page content and includes the Blazor
-  error notification UI. Its accompanying `.razor.css` file provides scoped styles.
-- `wwwroot/` contains publicly served static files. `app.css` supplies shared styles.
-
-New routable pages belong in `Components/Pages/`. Shared page layout changes
-belong in `Components/Layout/`, while styles specific to a component can live in
-an accompanying `.razor.css` file.
 
 ## Configuration
 
 | File | Purpose |
 | --- | --- |
-| `appsettings.json` | Base application configuration, including logging and allowed hosts. |
-| `appsettings.Development.json` | Configuration overrides for the Development environment. |
-| `Properties/launchSettings.json` | Local launch profiles, development URLs, and environment selection. |
+| `appsettings.json` | Base logging, host, and SQLite connection-string configuration. |
+| `appsettings.Development.json` | Development-environment overrides. |
+| `Properties/launchSettings.json` | Local HTTP and HTTPS launch profiles. |
 
-The HTTP launch profile uses port `5050`. The HTTPS profile uses port `7018`
-for HTTPS and `5050` for HTTP. Local launch profiles are development settings;
-they do not configure a deployed server.
+The default SQLite connection string is `Data Source=yadeh.db`. SQLite data files
+are local runtime artifacts and are excluded by `.gitignore`.
 
-`Program.cs` configures HTTPS redirection, static file serving, and antiforgery
-middleware. Outside Development, it also enables HSTS and routes unhandled
-exceptions to `/Error`.
+## Tests
 
-## Current Implementation Boundaries
+`Yadeh.Domain.Tests` covers URL validation and conversation aggregate invariants.
+`Yadeh.Infrastructure.Tests` covers ChatGPT page parsing and repository behavior
+against an in-memory SQLite database. Persistence tests verify complete aggregate
+round trips, ordering, source-URL lookup, rename persistence, and cascade deletion.
 
-The home page accepts a shared ChatGPT conversation URL and performs basic
-validation. It does not yet fetch conversations or extract key points.
+Run all tests with:
 
-Database persistence, authentication, conversation importing, and knowledge
-extraction have not yet been implemented. There are currently no separate
-service, data-access, or automated test projects.
+```sh
+dotnet test Yadeh.sln --configuration Release
+```
+
+## Current Boundaries
+
+Implemented:
+
+- ChatGPT share-link validation, download, and parsing;
+- conversation, snapshot, and message domain models;
+- SQLite persistence, migrations, repository, and Unit of Work;
+- automated Domain and Infrastructure tests.
+
+In progress:
+
+- provider-neutral Adapter and Resolver;
+- preview and import application workflow;
+- Blazor flows for creating or updating saved conversations.
+
+Planned:
+
+- conversation library pages and deletion controls;
+- knowledge extraction and search;
+- support for additional shared-chat providers;
+- authentication if Yadeh evolves beyond local single-user use.
